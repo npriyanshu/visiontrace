@@ -1,7 +1,7 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { useCamera } from '@/hooks/useCamera'
+import { useCallback, useEffect, useRef, useState, useMemo } from 'react'
+import { useCamera, CameraFacing } from '@/hooks/useCamera'
 import { useAutoHide } from '@/hooks/useAutoHide'
 import { usePWA } from '@/hooks/usePWA'
 import { useOpticalFlowTracker } from '@/hooks/useOpticalFlowTracker'
@@ -9,8 +9,8 @@ import { GridOverlay, GridMode } from '@/components/GridOverlay'
 import { PerspectiveOverlay, Corner } from '@/components/PerspectiveOverlay'
 import { HudButton } from '@/components/HudButton'
 import { AnchorStatusBar } from '@/components/AnchorStatusBar'
+import { Toast } from '@/components/Toast'
 
-// ─── Types ────────────────────────────────────────────────────────────────────
 interface Transform { x: number; y: number; scale: number; rotation: number }
 
 const DEFAULT_TRANSFORM: Transform = { x: 0, y: 0, scale: 1, rotation: 0 }
@@ -18,15 +18,8 @@ const DEFAULT_CORNERS: Corner[] = [
   { x: 5, y: 5 }, { x: 95, y: 5 },
   { x: 95, y: 95 }, { x: 5, y: 95 },
 ]
+const MAX_HISTORY = 30
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-const getDistance = (a: { x: number; y: number }, b: { x: number; y: number }) =>
-  Math.hypot(b.x - a.x, b.y - a.y)
-
-const getAngle = (a: { x: number; y: number }, b: { x: number; y: number }) =>
-  Math.atan2(b.y - a.y, b.x - a.x) * (180 / Math.PI)
-
-// ─── Icons ────────────────────────────────────────────────────────────────────
 const Icon = {
   plus: '＋',
   image: '🖼',
@@ -37,56 +30,128 @@ const Icon = {
   reset: '↺',
   anchorOn: '◉',
   anchorOff: '⊕',
+  camera: '📷',
+  export: '💾',
+  undo: '↩',
+  redo: '↪',
+  flipH: '↔',
+  flipV: '↕',
 }
 
-// ─── Page ────────────────────────────────────────────────────────────────────
 export default function Page() {
   usePWA()
 
-  const { videoRef, status: camStatus } = useCamera()
+  const [facing, setFacing] = useState<CameraFacing>('environment')
+  const { videoRef, status: camStatus } = useCamera(facing)
 
-  // Reference image
   const [imgSrc, setImgSrc] = useState<string | null>(null)
+  const blobUrlRef = useRef<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
 
-  // Manual transform (user drag/pinch)
-  const [transform, setTransform] = useState<Transform>(DEFAULT_TRANSFORM)
+  const [transform, setTransform] = useState<Transform>(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const saved = localStorage.getItem('vt_transform')
+        if (saved) return JSON.parse(saved)
+      } catch {}
+    }
+    return DEFAULT_TRANSFORM
+  })
+  const [corners, setCorners] = useState<Corner[]>(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const saved = localStorage.getItem('vt_corners')
+        if (saved) return JSON.parse(saved)
+      } catch {}
+    }
+    return DEFAULT_CORNERS
+  })
 
-  // Gesture tracking refs
+  const transformHistory = useRef<Transform[]>([])
+  const historyIndex = useRef(-1)
+
+  const pushHistory = useCallback((t: Transform) => {
+    const arr = transformHistory.current
+    if (historyIndex.current < arr.length - 1) {
+      arr.splice(historyIndex.current + 1)
+    }
+    arr.push({ ...t })
+    if (arr.length > MAX_HISTORY) arr.shift()
+    historyIndex.current = arr.length - 1
+  }, [])
+
+  const undo = useCallback(() => {
+    if (historyIndex.current > 0) {
+      historyIndex.current--
+      setTransform({ ...transformHistory.current[historyIndex.current] })
+    }
+  }, [])
+
+  const redo = useCallback(() => {
+    if (historyIndex.current < transformHistory.current.length - 1) {
+      historyIndex.current++
+      setTransform({ ...transformHistory.current[historyIndex.current] })
+    }
+  }, [])
+
   const pointers = useRef<Map<number, { x: number; y: number }>>(new Map())
   const lastDist = useRef<number | null>(null)
   const lastAngle = useRef<number | null>(null)
   const lastMid = useRef<{ x: number; y: number } | null>(null)
 
-  // UI state
-  const [opacity, setOpacity] = useState(0.75)
+  const [opacity, setOpacity] = useState(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const saved = localStorage.getItem('vt_opacity')
+        if (saved) return parseFloat(saved)
+      } catch {}
+    }
+    return 0.75
+  })
   const [isLocked, setIsLocked] = useState(false)
-  const [gridMode, setGridMode] = useState<GridMode>('none')
+  const [gridMode, setGridMode] = useState<GridMode>(() => {
+    if (typeof window !== 'undefined') {
+      try { return (localStorage.getItem('vt_grid') as GridMode) || 'none' } catch {}
+    }
+    return 'none'
+  })
   const [perspective, setPerspective] = useState(false)
-  const [corners, setCorners] = useState<Corner[]>(DEFAULT_CORNERS)
   const [lockBanner, setLockBanner] = useState(false)
 
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const { visible: uiVisible, show: showUI } = useAutoHide(isLocked)
 
-  // ── AR Anchor (Optical Flow) ──────────────────────────────────────────────
-  const { status: anchorStatus, delta, libReady, startTargeting, lockAnchor, stopTracking } =
+  const [toast, setToast] = useState<string | null>(null)
+  const showToast = useCallback((msg: string) => {
+    setToast(msg)
+    setTimeout(() => setToast(null), 3000)
+  }, [])
+
+  const { status: anchorStatus, delta, libReady, cvError, startTargeting, lockAnchor, stopTracking } =
     useOpticalFlowTracker(videoRef)
 
   const [anchorActive, setAnchorActive] = useState(false)
 
-  // Store the image transform AT THE MOMENT we start tracking
-  // so we can apply AR delta on top of it
   const baseLockTransform = useRef<Transform>(DEFAULT_TRANSFORM)
   useEffect(() => {
     if (anchorStatus === 'searching') {
       baseLockTransform.current = { ...transform }
     }
-  }, [anchorStatus]) // intentionally NOT including transform — only want snapshot at moment of locking
+  }, [anchorStatus])
 
-  // Compute the EFFECTIVE transform to render:
-  // - When AR locked/lost: apply delta on top of base transform
-  // - Otherwise: use manual transform
+  const transformRef = useRef<Transform>(transform)
+  useEffect(() => { transformRef.current = transform }, [transform])
+
+  const commitRef = useRef<ReturnType<typeof requestAnimationFrame> | null>(null)
+  const commitTransform = useCallback((t: Transform, saveHistory = false) => {
+    if (commitRef.current) cancelAnimationFrame(commitRef.current)
+    commitRef.current = requestAnimationFrame(() => {
+      setTransform(t)
+      if (saveHistory) pushHistory(t)
+      commitRef.current = null
+    })
+  }, [pushHistory])
+
   const arActive = anchorActive && (anchorStatus === 'locked' || anchorStatus === 'lost' || anchorStatus === 'searching')
 
   const displayTransform: Transform = arActive && (anchorStatus === 'locked' || anchorStatus === 'lost')
@@ -98,9 +163,29 @@ export default function Page() {
     }
     : transform
 
-  const imgTransform = `translate(${displayTransform.x}px, ${displayTransform.y}px) scale(${displayTransform.scale}) rotate(${displayTransform.rotation}deg)`
+  const imgTransform = useMemo(
+    () => `translate(${displayTransform.x}px, ${displayTransform.y}px) scale(${displayTransform.scale}) rotate(${displayTransform.rotation}deg)`,
+    [displayTransform.x, displayTransform.y, displayTransform.scale, displayTransform.rotation]
+  )
 
-  // ── Lock banner ───────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (transform !== DEFAULT_TRANSFORM) {
+      try { localStorage.setItem('vt_transform', JSON.stringify(transform)) } catch {}
+    }
+  }, [transform])
+
+  useEffect(() => {
+    try { localStorage.setItem('vt_corners', JSON.stringify(corners)) } catch {}
+  }, [corners])
+
+  useEffect(() => {
+    try { localStorage.setItem('vt_opacity', String(opacity)) } catch {}
+  }, [opacity])
+
+  useEffect(() => {
+    try { localStorage.setItem('vt_grid', gridMode) } catch {}
+  }, [gridMode])
+
   useEffect(() => {
     if (isLocked) {
       setLockBanner(true)
@@ -111,21 +196,22 @@ export default function Page() {
     }
   }, [isLocked])
 
-  // ── File picker ───────────────────────────────────────────────────────────
   const pickImage = useCallback(() => { fileRef.current?.click() }, [])
 
   const onFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
-    const url = URL.createObjectURL(file)
-    setImgSrc(url)
+    if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current)
+    blobUrlRef.current = URL.createObjectURL(file)
+    setImgSrc(blobUrlRef.current)
     setTransform(DEFAULT_TRANSFORM)
     setCorners(DEFAULT_CORNERS)
+    transformHistory.current = [{ ...DEFAULT_TRANSFORM }]
+    historyIndex.current = 0
     showUI()
     e.target.value = ''
   }, [showUI])
 
-  // ── Gesture handlers ──────────────────────────────────────────────────────
   const onImgPointerDown = useCallback((e: React.PointerEvent) => {
     e.preventDefault()
     e.stopPropagation()
@@ -140,14 +226,13 @@ export default function Page() {
       return
     }
 
-    // Disable manual gestures when AR is controlling the transform
     if (arActive && anchorStatus === 'locked') return
 
     pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
     if (pointers.current.size === 2) {
       const [a, b] = Array.from(pointers.current.values())
-      lastDist.current = getDistance(a, b)
-      lastAngle.current = getAngle(a, b)
+      lastDist.current = Math.hypot(b.x - a.x, b.y - a.y)
+      lastAngle.current = Math.atan2(b.y - a.y, b.x - a.x) * (180 / Math.PI)
       lastMid.current = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
     }
     showUI()
@@ -165,46 +250,54 @@ export default function Page() {
     if (pts.length === 1) {
       const dx = e.clientX - prev.x
       const dy = e.clientY - prev.y
-      setTransform(t => ({ ...t, x: t.x + dx, y: t.y + dy }))
+      const t = transformRef.current
+      commitTransform({ ...t, x: t.x + dx, y: t.y + dy })
     }
 
     if (pts.length === 2) {
       const [a, b] = pts
-      const dist = getDistance(a, b)
-      const angle = getAngle(a, b)
+      const dist = Math.hypot(b.x - a.x, b.y - a.y)
+      const angle = Math.atan2(b.y - a.y, b.x - a.x) * (180 / Math.PI)
       const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
       if (lastDist.current !== null) {
         const scaleDelta = dist / lastDist.current
         const rotDelta = angle - lastAngle.current!
         const panX = mid.x - lastMid.current!.x
         const panY = mid.y - lastMid.current!.y
-        setTransform(t => ({
+        const t = transformRef.current
+        commitTransform({
           x: t.x + panX,
           y: t.y + panY,
           scale: Math.min(Math.max(t.scale * scaleDelta, 0.05), 20),
           rotation: t.rotation + rotDelta,
-        }))
+        })
       }
       lastDist.current = dist
       lastAngle.current = angle
       lastMid.current = mid
     }
     showUI()
-  }, [isLocked, showUI, arActive, anchorStatus])
+  }, [isLocked, showUI, arActive, anchorStatus, commitTransform])
 
   const onImgPointerUp = useCallback((e: React.PointerEvent) => {
     pointers.current.delete(e.pointerId)
     if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null }
     if (pointers.current.size < 2) { lastDist.current = null; lastAngle.current = null; lastMid.current = null }
+    if (pointers.current.size === 0) {
+      pushHistory(transformRef.current)
+    }
+  }, [pushHistory])
+
+  useEffect(() => {
+    transformHistory.current = [{ ...DEFAULT_TRANSFORM }]
+    historyIndex.current = 0
   }, [])
 
-  // ── Grid ──────────────────────────────────────────────────────────────────
   const cycleGrid = useCallback(() => {
     setGridMode(m => m === 'none' ? '3x3' : m === '3x3' ? '10x10' : 'none')
     showUI()
   }, [showUI])
 
-  // ── Lock ──────────────────────────────────────────────────────────────────
   const toggleLock = useCallback(() => {
     setIsLocked(v => {
       const next = !v
@@ -214,28 +307,121 @@ export default function Page() {
     showUI()
   }, [showUI])
 
-  // ── Anchor toggle ─────────────────────────────────────────────────────────
   const toggleAnchor = useCallback(() => {
     if (!imgSrc) {
-      alert("Please tap 'Load' to select a reference image to trace before locking an AR Anchor.")
-      showUI()
+      showToast("Tap Load first to select a reference image")
       return
     }
 
     if (anchorActive) {
-      // Deactivate: sync manual transform to wherever AR left it
       setTransform({ ...displayTransform })
       stopTracking()
       setAnchorActive(false)
     } else {
-      // Activate: switch to targeting mode
       setAnchorActive(true)
       startTargeting()
     }
     showUI()
-  }, [anchorActive, displayTransform, stopTracking, startTargeting, showUI])
+  }, [anchorActive, displayTransform, stopTracking, startTargeting, showUI, imgSrc, showToast])
 
-  // ── Camera denied screen ──────────────────────────────────────────────────
+  const toggleCamera = useCallback(() => {
+    setFacing(f => f === 'environment' ? 'user' : 'environment')
+    if (anchorActive) { stopTracking(); setAnchorActive(false) }
+    showUI()
+  }, [anchorActive, stopTracking, showUI])
+
+  const flipHorizontal = useCallback(() => {
+    const t = transformRef.current
+    commitTransform({ ...t, x: -t.x, scale: t.scale }, true)
+    showUI()
+  }, [commitTransform, showUI])
+
+  const flipVertical = useCallback(() => {
+    const t = transformRef.current
+    commitTransform({ ...t, y: -t.y, scale: t.scale }, true)
+    showUI()
+  }, [commitTransform, showUI])
+
+  const takeScreenshot = useCallback(() => {
+    const video = videoRef.current
+    if (!video) return
+    const canvas = document.createElement('canvas')
+    canvas.width = window.innerWidth
+    canvas.height = window.innerHeight
+    const ctx = canvas.getContext('2d')!
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+
+    if (imgSrc) {
+      const img = new Image()
+      img.crossOrigin = 'anonymous'
+      img.onload = () => {
+        ctx.save()
+        ctx.translate(canvas.width / 2 + displayTransform.x, canvas.height / 2 + displayTransform.y)
+        ctx.scale(displayTransform.scale * (corners[0].x > 50 ? -1 : 1), displayTransform.scale * (corners[0].y > 50 ? -1 : 1))
+        ctx.rotate((displayTransform.rotation * Math.PI) / 180)
+        const imgW = Math.min(img.width, canvas.width * 0.9)
+        const imgH = (imgW / img.width) * img.height
+        ctx.globalAlpha = opacity
+        if (perspective) {
+          ctx.beginPath()
+          ctx.moveTo(imgW / 2 * (corners[0].x / 50 - 1), imgH / 2 * (corners[0].y / 50 - 1))
+          ctx.lineTo(imgW / 2 * (corners[1].x / 50 - 1), imgH / 2 * (corners[1].y / 50 - 1))
+          ctx.lineTo(imgW / 2 * (corners[2].x / 50 - 1), imgH / 2 * (corners[2].y / 50 - 1))
+          ctx.lineTo(imgW / 2 * (corners[3].x / 50 - 1), imgH / 2 * (corners[3].y / 50 - 1))
+          ctx.closePath()
+          ctx.clip()
+        }
+        ctx.drawImage(img, -imgW / 2, -imgH / 2, imgW, imgH)
+        ctx.restore()
+        const link = document.createElement('a')
+        link.download = `visiontrace-${Date.now()}.png`
+        link.href = canvas.toDataURL('image/png')
+        link.click()
+        showToast('Screenshot saved!')
+      }
+      img.onerror = () => showToast('Screenshot failed — try again')
+      img.src = imgSrc
+    } else {
+      const link = document.createElement('a')
+      link.download = `visiontrace-${Date.now()}.png`
+      link.href = canvas.toDataURL('image/png')
+      link.click()
+      showToast('Screenshot saved!')
+    }
+  }, [videoRef, imgSrc, displayTransform, opacity, perspective, corners, showToast])
+
+  useEffect(() => {
+    if (cvError) showToast('AR tracking unavailable — check connection')
+  }, [cvError, showToast])
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey) {
+        if (e.key === 'z' && !e.shiftKey) { e.preventDefault(); undo() }
+        if ((e.key === 'z' && e.shiftKey) || e.key === 'y') { e.preventDefault(); redo() }
+        if (e.key === 's') { e.preventDefault(); takeScreenshot() }
+      }
+      if (e.key === 'l') toggleLock()
+      if (e.key === 'g') cycleGrid()
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [undo, redo, takeScreenshot, toggleLock, cycleGrid])
+
+  useEffect(() => {
+    if (delta.dx !== 0 || delta.dy !== 0) {
+      const limit = 500
+      const overflow = Math.abs(delta.dx) > limit || Math.abs(delta.dy) > limit
+      if (overflow) {
+        setTransform(prev => {
+          const nx = prev.x + delta.dx / 2
+          const ny = prev.y + delta.dy / 2
+          return { ...prev, x: nx, y: ny }
+        })
+      }
+    }
+  }, [delta])
+
   if (camStatus === 'denied' || camStatus === 'error') {
     return (
       <div style={{
@@ -266,17 +452,18 @@ export default function Page() {
     )
   }
 
-  // ─── Render ────────────────────────────────────────────────────────────────
   return (
     <main
       style={{
         position: 'relative', width: '100dvw', height: '100dvh',
         overflow: 'hidden', background: '#000',
         overscrollBehavior: 'none',
+        userSelect: 'none',
       }}
       onClick={showUI}
     >
-      {/* ── Layer 1: Camera ───────────────────────────────────────────────── */}
+      {toast && <Toast message={toast} />}
+
       <video
         ref={videoRef}
         muted playsInline autoPlay
@@ -287,7 +474,6 @@ export default function Page() {
         }}
       />
 
-      {/* ── Layer 2: Reference image ──────────────────────────────────────── */}
       {imgSrc && (
         <div
           onPointerDown={onImgPointerDown}
@@ -315,42 +501,29 @@ export default function Page() {
               pointerEvents: 'none',
               willChange: 'transform',
               ...(perspective ? {
-                clipPath: `polygon(
-                  ${corners[0].x}% ${corners[0].y}%,
-                  ${corners[1].x}% ${corners[1].y}%,
-                  ${corners[2].x}% ${corners[2].y}%,
-                  ${corners[3].x}% ${corners[3].y}%
-                )`,
+                clipPath: `polygon(${corners[0].x}% ${corners[0].y}%,${corners[1].x}% ${corners[1].y}%,${corners[2].x}% ${corners[2].y}%,${corners[3].x}% ${corners[3].y}%)`,
               } : {}),
             }}
           />
         </div>
       )}
 
-      {/* ── Layer 3: Perspective handles ──────────────────────────────────── */}
       {perspective && imgSrc && <PerspectiveOverlay corners={corners} onChange={setCorners} />}
 
-      {/* ── Layer 4: Grid ─────────────────────────────────────────────────── */}
       <GridOverlay mode={gridMode} />
 
-      {/* ── Layer 5: AR status pill ───────────────────────────────────────── */}
-      {anchorActive && (
-        <AnchorStatusBar status={anchorStatus} libReady={libReady} />
-      )}
+      {anchorActive && <AnchorStatusBar status={anchorStatus} libReady={libReady} />}
 
-      {/* ── Layer 6: Center Targeting Crosshair & Re-anchor hint ────────────── */}
       {anchorActive && anchorStatus === 'searching' && (
         <div style={{
           position: 'absolute', inset: 0,
           display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
           pointerEvents: 'none', zIndex: 55,
         }}>
-          {/* Subtle overlay box showing tracking region */}
           <div style={{
             width: 80, height: 80, border: '2px solid rgba(251, 191, 36, 0.5)',
             position: 'relative',
           }}>
-            {/* Crosshair inside */}
             <div style={{ position: 'absolute', width: 2, height: 20, background: '#fbbf24', top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }} />
             <div style={{ position: 'absolute', width: 20, height: 2, background: '#fbbf24', top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }} />
           </div>
@@ -375,7 +548,7 @@ export default function Page() {
 
       {anchorActive && anchorStatus === 'lost' && (
         <div style={{
-          position: 'absolute', bottom: 100, left: '50%',
+          position: 'absolute', bottom: 120, left: '50%',
           transform: 'translateX(-50%)', zIndex: 55,
           whiteSpace: 'nowrap',
         }}>
@@ -395,9 +568,8 @@ export default function Page() {
         </div>
       )}
 
-      {/* ── Layer 7: Lock banner ──────────────────────────────────────────── */}
       <div style={{
-        position: 'absolute', bottom: 100, left: '50%',
+        position: 'absolute', bottom: 120, left: '50%',
         transform: 'translateX(-50%)', zIndex: 50,
         transition: 'opacity 0.35s ease',
         opacity: lockBanner ? 1 : 0,
@@ -414,70 +586,53 @@ export default function Page() {
         </div>
       </div>
 
-      {/* ── Layer 8: HUD ──────────────────────────────────────────────────── */}
       <div style={{
         position: 'absolute', inset: 0, zIndex: 40,
         pointerEvents: 'none', transition: 'opacity 0.4s ease',
         opacity: uiVisible ? 1 : (isLocked ? 0.15 : 0),
       }}>
-        {/* Top toolbar */}
         <div style={{
           position: 'absolute', top: 0, left: 0, right: 0,
           padding: '52px 16px 14px',
-          display: 'flex', alignItems: 'center', gap: 8,
+          display: 'flex', alignItems: 'center', gap: 6,
           background: 'linear-gradient(to bottom, rgba(0,0,0,0.82) 0%, transparent 100%)',
           pointerEvents: uiVisible ? 'auto' : (isLocked ? 'auto' : 'none'),
           flexWrap: 'nowrap', overflowX: 'auto',
         }}>
-          {/* App name */}
           <div style={{
             fontFamily: 'Syne, sans-serif', fontSize: 15, fontWeight: 800,
             letterSpacing: '3px', color: '#ff6b35', marginRight: 2,
             textTransform: 'uppercase', flexShrink: 0,
           }}>VT</div>
 
-          {/* Load image */}
           <HudButton onClick={pickImage} label={imgSrc ? 'Swap' : 'Load'}>
             {imgSrc ? Icon.image : Icon.plus}
           </HudButton>
-          <input
-            ref={fileRef} type="file" accept="image/*"
-            onChange={onFileChange} style={{ display: 'none' }}
-          />
+          <input ref={fileRef} type="file" accept="image/*" onChange={onFileChange} style={{ display: 'none' }} />
 
-          {/* Tracing lock */}
           <HudButton onClick={toggleLock} active={isLocked} danger={isLocked}
             label={isLocked ? 'Locked' : 'Lock'}>
             {isLocked ? Icon.lock : Icon.unlock}
           </HudButton>
 
-          {/* AR Anchor */}
           <HudButton
             onClick={toggleAnchor}
             active={anchorActive}
             label={anchorActive ? (anchorStatus === 'locked' ? 'AR On' : 'AR…') : 'Anchor'}
             style={{
-              border: anchorActive && anchorStatus === 'locked'
-                ? '1px solid rgba(34,197,94,0.7)'
-                : undefined,
-              background: anchorActive && anchorStatus === 'locked'
-                ? 'rgba(34,197,94,0.22)'
-                : undefined,
-              color: anchorActive && anchorStatus === 'locked'
-                ? '#22c55e'
-                : undefined,
+              border: anchorActive && anchorStatus === 'locked' ? '1px solid rgba(34,197,94,0.7)' : undefined,
+              background: anchorActive && anchorStatus === 'locked' ? 'rgba(34,197,94,0.22)' : undefined,
+              color: anchorActive && anchorStatus === 'locked' ? '#22c55e' : undefined,
             }}
           >
             {anchorActive ? Icon.anchorOn : Icon.anchorOff}
           </HudButton>
 
-          {/* Grid */}
           <HudButton onClick={cycleGrid} active={gridMode !== 'none'}
             label={gridMode === 'none' ? 'Grid' : gridMode}>
             {Icon.grid}
           </HudButton>
 
-          {/* Perspective */}
           <HudButton
             onClick={() => { setPerspective(v => !v); showUI() }}
             active={perspective} label="Persp">
@@ -486,11 +641,30 @@ export default function Page() {
 
           <div style={{ flex: 1, minWidth: 8 }} />
 
-          {/* Reset */}
+          <HudButton onClick={undo} label="Undo" disabled={historyIndex.current <= 0}>
+            {Icon.undo}
+          </HudButton>
+          <HudButton onClick={redo} label="Redo" disabled={historyIndex.current >= transformHistory.current.length - 1}>
+            {Icon.redo}
+          </HudButton>
+          <HudButton onClick={toggleCamera} label={facing === 'environment' ? 'Front' : 'Back'}>
+            {Icon.camera}
+          </HudButton>
+          <HudButton onClick={flipHorizontal} label="Flip H">
+            {Icon.flipH}
+          </HudButton>
+          <HudButton onClick={flipVertical} label="Flip V">
+            {Icon.flipV}
+          </HudButton>
+          <HudButton onClick={takeScreenshot} label="Save">
+            {Icon.export}
+          </HudButton>
           <HudButton
             onClick={() => {
               setTransform(DEFAULT_TRANSFORM)
               setCorners(DEFAULT_CORNERS)
+              transformHistory.current = [{ ...DEFAULT_TRANSFORM }]
+              historyIndex.current = 0
               if (anchorActive) { stopTracking(); setAnchorActive(false) }
               showUI()
             }}
@@ -499,7 +673,6 @@ export default function Page() {
           </HudButton>
         </div>
 
-        {/* ── Opacity slider ───────────────────────────────────────────── */}
         {imgSrc && (
           <div style={{
             position: 'absolute', right: 12, top: '50%',
@@ -515,7 +688,6 @@ export default function Page() {
           </div>
         )}
 
-        {/* ── Bottom status strip ──────────────────────────────────────── */}
         {imgSrc && (
           <div style={{
             position: 'absolute', bottom: 0, left: 0, right: 0,
@@ -528,7 +700,7 @@ export default function Page() {
               ['Opacity', `${Math.round(opacity * 100)}%`],
               ['Scale', `${displayTransform.scale.toFixed(1)}×`],
               ['Rotate', `${Math.round(displayTransform.rotation)}°`],
-              ['AR', anchorActive ? (anchorStatus === 'locked' ? '🔵' : '…') : 'Off'],
+              ['AR', anchorActive ? (anchorStatus === 'locked' ? '●' : '…') : 'Off'],
             ].map(([label, value]) => (
               <div key={label} style={{ textAlign: 'center' }}>
                 <div style={{ fontSize: 9, color: 'rgba(255,255,255,0.4)', fontFamily: 'DM Mono, monospace', letterSpacing: 1 }}>{label}</div>
@@ -539,7 +711,6 @@ export default function Page() {
         )}
       </div>
 
-      {/* ── No image placeholder ──────────────────────────────────────────── */}
       {!imgSrc && camStatus === 'active' && (
         <div style={{
           position: 'absolute', inset: 0, zIndex: 5,
@@ -556,12 +727,10 @@ export default function Page() {
           </div>
         </div>
       )}
-
     </main>
   )
 }
 
-// ─── Custom Vertical Slider ───────────────────────────────────────────────────
 interface SliderProps {
   value: number
   onChange: (v: number) => void
@@ -580,7 +749,7 @@ function VerticalSlider({ value, onChange, onInteract }: SliderProps) {
   const onPointerDown = useCallback((e: React.PointerEvent) => {
     e.preventDefault(); e.stopPropagation()
     dragging.current = true
-      ; (e.target as Element).setPointerCapture(e.pointerId)
+    ;(e.target as Element).setPointerCapture(e.pointerId)
     onChange(getVal(e)); onInteract()
   }, [getVal, onChange, onInteract])
 

@@ -1,5 +1,5 @@
 'use client'
-import { useRef, useCallback } from 'react'
+import { useRef, useCallback, useMemo } from 'react'
 
 export interface Corner { x: number; y: number }
 
@@ -8,19 +8,26 @@ interface Props {
   onChange: (corners: Corner[]) => void
 }
 
-// Bigger handle radius for easier touch on phones
-const HANDLE_R = 24  // visible circle
-const HANDLE_TOUCH_R = 36  // invisible larger touch target
+const HANDLE_R = 24
+const HANDLE_TOUCH_R = 36
+const VIEWBOX = 100
+
+function computeScaleFactor() {
+  if (typeof window === 'undefined') return 1
+  return VIEWBOX / Math.min(window.innerWidth, window.innerHeight) / 2
+}
 
 export function PerspectiveOverlay({ corners, onChange }: Props) {
   const dragging = useRef<number | null>(null)
   const svgRef = useRef<SVGSVGElement>(null)
 
+  const scaleFactor = useMemo(computeScaleFactor, [])
+
   const toSVGPoint = useCallback((e: React.PointerEvent): Corner => {
     const rect = svgRef.current!.getBoundingClientRect()
     return {
-      x: Math.min(Math.max(((e.clientX - rect.left) / rect.width) * 100, 0), 100),
-      y: Math.min(Math.max(((e.clientY - rect.top) / rect.height) * 100, 0), 100),
+      x: Math.min(Math.max(((e.clientX - rect.left) / rect.width) * VIEWBOX, 0), VIEWBOX),
+      y: Math.min(Math.max(((e.clientY - rect.top) / rect.height) * VIEWBOX, 0), VIEWBOX),
     }
   }, [])
 
@@ -28,7 +35,7 @@ export function PerspectiveOverlay({ corners, onChange }: Props) {
     e.stopPropagation()
     e.preventDefault()
     dragging.current = index
-      ; (e.target as Element).setPointerCapture(e.pointerId)
+    ;(e.target as Element).setPointerCapture(e.pointerId)
   }, [])
 
   const onPointerMove = useCallback((e: React.PointerEvent) => {
@@ -43,15 +50,19 @@ export function PerspectiveOverlay({ corners, onChange }: Props) {
     dragging.current = null
   }, [])
 
-  // Polygon path from corners (percentage-based viewBox 0 0 100 100)
   const points = corners.map(c => `${c.x},${c.y}`).join(' ')
 
   const LABEL_ICONS = ['↖', '↗', '↘', '↙']
 
+  const touchR = HANDLE_TOUCH_R * scaleFactor
+  const outerR = HANDLE_R * scaleFactor
+  const innerR = HANDLE_R * scaleFactor * 0.6
+  const fontSz = HANDLE_R * scaleFactor * 0.6
+
   return (
     <svg
       ref={svgRef}
-      viewBox="0 0 100 100"
+      viewBox={`0 0 ${VIEWBOX} ${VIEWBOX}`}
       preserveAspectRatio="none"
       style={{
         position: 'absolute', inset: 0,
@@ -64,7 +75,6 @@ export function PerspectiveOverlay({ corners, onChange }: Props) {
       onPointerUp={onPointerUp}
       onPointerLeave={onPointerUp}
     >
-      {/* Quad outline */}
       <polygon
         points={points}
         fill="rgba(255,107,53,0.06)"
@@ -73,41 +83,36 @@ export function PerspectiveOverlay({ corners, onChange }: Props) {
         strokeDasharray="2 1.5"
       />
 
-      {/* Corner handles */}
       {corners.map((c, i) => (
         <g
           key={i}
           onPointerDown={(e) => onHandleDown(e, i)}
           style={{ cursor: 'grab' }}
         >
-          {/* Large transparent hit area */}
           <circle
             cx={c.x} cy={c.y}
-            r={HANDLE_TOUCH_R * (100 / window.innerWidth) * 100}
+            r={touchR}
             fill="transparent"
           />
-          {/* Outer glow ring */}
           <circle
             cx={c.x} cy={c.y}
-            r={HANDLE_R * (100 / Math.min(window.innerWidth, window.innerHeight)) * 50}
+            r={outerR}
             fill="rgba(255,107,53,0.18)"
             stroke="rgba(255,107,53,0.6)"
             strokeWidth="0.4"
           />
-          {/* Inner handle */}
           <circle
             cx={c.x} cy={c.y}
-            r={HANDLE_R * (100 / Math.min(window.innerWidth, window.innerHeight)) * 30}
+            r={innerR}
             fill="rgba(255,107,53,0.95)"
             stroke="white"
             strokeWidth="0.5"
           />
-          {/* Arrow icon */}
           <text
             x={c.x} y={c.y}
             textAnchor="middle"
             dominantBaseline="central"
-            fontSize={HANDLE_R * (100 / Math.min(window.innerWidth, window.innerHeight)) * 18}
+            fontSize={fontSz}
             fill="white"
             fontWeight="600"
             style={{ pointerEvents: 'none', userSelect: 'none' }}
