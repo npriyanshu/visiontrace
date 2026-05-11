@@ -4,12 +4,11 @@ import { useCallback, useEffect, useRef, useState, useMemo } from 'react'
 import { useCamera, CameraFacing } from '@/hooks/useCamera'
 import { useAutoHide } from '@/hooks/useAutoHide'
 import { usePWA } from '@/hooks/usePWA'
-import { useOpticalFlowTracker } from '@/hooks/useOpticalFlowTracker'
+import { useOpticalFlowTracker, AnchorStatus } from '@/hooks/useOpticalFlowTracker'
 import { GridOverlay, GridMode } from '@/components/GridOverlay'
 import { PerspectiveOverlay, Corner } from '@/components/PerspectiveOverlay'
-import { HudButton } from '@/components/HudButton'
-import { AnchorStatusBar } from '@/components/AnchorStatusBar'
 import { Toast } from '@/components/Toast'
+import { BottomBar } from '@/components/BottomBar'
 
 interface Transform { x: number; y: number; scale: number; rotation: number }
 
@@ -19,24 +18,6 @@ const DEFAULT_CORNERS: Corner[] = [
   { x: 95, y: 95 }, { x: 5, y: 95 },
 ]
 const MAX_HISTORY = 30
-
-const Icon = {
-  plus: '＋',
-  image: '🖼',
-  lock: '🔒',
-  unlock: '🔓',
-  grid: '⊞',
-  perspective: '⬡',
-  reset: '↺',
-  anchorOn: '◉',
-  anchorOff: '⊕',
-  camera: '📷',
-  export: '💾',
-  undo: '↩',
-  redo: '↪',
-  flipH: '↔',
-  flipV: '↕',
-}
 
 export default function Page() {
   usePWA()
@@ -51,8 +32,8 @@ export default function Page() {
   const [transform, setTransform] = useState<Transform>(() => {
     if (typeof window !== 'undefined') {
       try {
-        const saved = localStorage.getItem('vt_transform')
-        if (saved) return JSON.parse(saved)
+        const s = localStorage.getItem('vt_transform')
+        if (s) return JSON.parse(s)
       } catch {}
     }
     return DEFAULT_TRANSFORM
@@ -60,21 +41,19 @@ export default function Page() {
   const [corners, setCorners] = useState<Corner[]>(() => {
     if (typeof window !== 'undefined') {
       try {
-        const saved = localStorage.getItem('vt_corners')
-        if (saved) return JSON.parse(saved)
+        const s = localStorage.getItem('vt_corners')
+        if (s) return JSON.parse(s)
       } catch {}
     }
     return DEFAULT_CORNERS
   })
 
-  const transformHistory = useRef<Transform[]>([])
-  const historyIndex = useRef(-1)
+  const transformHistory = useRef<Transform[]>([{ ...DEFAULT_TRANSFORM }])
+  const historyIndex = useRef(0)
 
   const pushHistory = useCallback((t: Transform) => {
     const arr = transformHistory.current
-    if (historyIndex.current < arr.length - 1) {
-      arr.splice(historyIndex.current + 1)
-    }
+    if (historyIndex.current < arr.length - 1) arr.splice(historyIndex.current + 1)
     arr.push({ ...t })
     if (arr.length > MAX_HISTORY) arr.shift()
     historyIndex.current = arr.length - 1
@@ -102,8 +81,8 @@ export default function Page() {
   const [opacity, setOpacity] = useState(() => {
     if (typeof window !== 'undefined') {
       try {
-        const saved = localStorage.getItem('vt_opacity')
-        if (saved) return parseFloat(saved)
+        const s = localStorage.getItem('vt_opacity')
+        if (s) return parseFloat(s)
       } catch {}
     }
     return 0.75
@@ -117,6 +96,8 @@ export default function Page() {
   })
   const [perspective, setPerspective] = useState(false)
   const [lockBanner, setLockBanner] = useState(false)
+  const [showTools, setShowTools] = useState(false)
+  const [showOnboarding, setShowOnboarding] = useState(false)
 
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const { visible: uiVisible, show: showUI } = useAutoHide(isLocked)
@@ -127,16 +108,26 @@ export default function Page() {
     setTimeout(() => setToast(null), 3000)
   }, [])
 
-  const { status: anchorStatus, delta, libReady, cvError, startTargeting, lockAnchor, stopTracking } =
-    useOpticalFlowTracker(videoRef)
+  const {
+    status: anchorStatus, delta, libReady, cvError,
+    triggerCvLoad, startTargeting, lockAnchor, stopTracking
+  } = useOpticalFlowTracker(videoRef)
 
   const [anchorActive, setAnchorActive] = useState(false)
 
+  useEffect(() => {
+    const seen = localStorage.getItem('vt_onboarded')
+    if (!seen) setShowOnboarding(true)
+  }, [])
+
+  const dismissOnboarding = useCallback(() => {
+    setShowOnboarding(false)
+    localStorage.setItem('vt_onboarded', '1')
+  }, [])
+
   const baseLockTransform = useRef<Transform>(DEFAULT_TRANSFORM)
   useEffect(() => {
-    if (anchorStatus === 'searching') {
-      baseLockTransform.current = { ...transform }
-    }
+    if (anchorStatus === 'searching') baseLockTransform.current = { ...transform }
   }, [anchorStatus])
 
   const transformRef = useRef<Transform>(transform)
@@ -152,7 +143,7 @@ export default function Page() {
     })
   }, [pushHistory])
 
-  const arActive = anchorActive && (anchorStatus === 'locked' || anchorStatus === 'lost' || anchorStatus === 'searching')
+  const arActive = anchorActive && (anchorStatus === 'locked' || anchorStatus === 'lost' || anchorStatus === 'searching' || anchorStatus === 'loading')
 
   const displayTransform: Transform = arActive && (anchorStatus === 'locked' || anchorStatus === 'lost')
     ? {
@@ -173,27 +164,17 @@ export default function Page() {
       try { localStorage.setItem('vt_transform', JSON.stringify(transform)) } catch {}
     }
   }, [transform])
-
-  useEffect(() => {
-    try { localStorage.setItem('vt_corners', JSON.stringify(corners)) } catch {}
-  }, [corners])
-
-  useEffect(() => {
-    try { localStorage.setItem('vt_opacity', String(opacity)) } catch {}
-  }, [opacity])
-
-  useEffect(() => {
-    try { localStorage.setItem('vt_grid', gridMode) } catch {}
-  }, [gridMode])
+  useEffect(() => { try { localStorage.setItem('vt_corners', JSON.stringify(corners)) } catch {} }, [corners])
+  useEffect(() => { try { localStorage.setItem('vt_opacity', String(opacity)) } catch {} }, [opacity])
+  useEffect(() => { try { localStorage.setItem('vt_grid', gridMode) } catch {} }, [gridMode])
 
   useEffect(() => {
     if (isLocked) {
       setLockBanner(true)
       const t = setTimeout(() => setLockBanner(false), 2500)
       return () => clearTimeout(t)
-    } else {
-      setLockBanner(false)
     }
+    setLockBanner(false)
   }, [isLocked])
 
   const pickImage = useCallback(() => { fileRef.current?.click() }, [])
@@ -222,7 +203,7 @@ export default function Page() {
         setIsLocked(false)
         if (navigator.vibrate) navigator.vibrate([50, 30, 50])
         showUI()
-      }, 800)
+      }, 600)
       return
     }
 
@@ -283,15 +264,8 @@ export default function Page() {
     pointers.current.delete(e.pointerId)
     if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null }
     if (pointers.current.size < 2) { lastDist.current = null; lastAngle.current = null; lastMid.current = null }
-    if (pointers.current.size === 0) {
-      pushHistory(transformRef.current)
-    }
+    if (pointers.current.size === 0) pushHistory(transformRef.current)
   }, [pushHistory])
-
-  useEffect(() => {
-    transformHistory.current = [{ ...DEFAULT_TRANSFORM }]
-    historyIndex.current = 0
-  }, [])
 
   const cycleGrid = useCallback(() => {
     setGridMode(m => m === 'none' ? '3x3' : m === '3x3' ? '10x10' : 'none')
@@ -307,22 +281,31 @@ export default function Page() {
     showUI()
   }, [showUI])
 
-  const toggleAnchor = useCallback(() => {
-    if (!imgSrc) {
-      showToast("Tap Load first to select a reference image")
-      return
-    }
-
+  const handleAnchor = useCallback(() => {
     if (anchorActive) {
       setTransform({ ...displayTransform })
       stopTracking()
       setAnchorActive(false)
     } else {
       setAnchorActive(true)
+      triggerCvLoad()
       startTargeting()
     }
     showUI()
-  }, [anchorActive, displayTransform, stopTracking, startTargeting, showUI, imgSrc, showToast])
+  }, [anchorActive, displayTransform, stopTracking, triggerCvLoad, startTargeting, showUI])
+
+  useEffect(() => {
+    if (cvError) showToast('AR failed to load — check internet')
+  }, [cvError, showToast])
+
+  useEffect(() => {
+    if (delta.dx !== 0 || delta.dy !== 0) {
+      const limit = 300
+      if (Math.abs(delta.dx) > limit || Math.abs(delta.dy) > limit) {
+        setTransform(prev => ({ ...prev, x: prev.x + delta.dx / 3, y: prev.y + delta.dy / 3 }))
+      }
+    }
+  }, [delta])
 
   const toggleCamera = useCallback(() => {
     setFacing(f => f === 'environment' ? 'user' : 'environment')
@@ -357,85 +340,63 @@ export default function Page() {
       img.onload = () => {
         ctx.save()
         ctx.translate(canvas.width / 2 + displayTransform.x, canvas.height / 2 + displayTransform.y)
-        ctx.scale(displayTransform.scale * (corners[0].x > 50 ? -1 : 1), displayTransform.scale * (corners[0].y > 50 ? -1 : 1))
+        ctx.scale(displayTransform.scale, displayTransform.scale)
         ctx.rotate((displayTransform.rotation * Math.PI) / 180)
         const imgW = Math.min(img.width, canvas.width * 0.9)
         const imgH = (imgW / img.width) * img.height
         ctx.globalAlpha = opacity
-        if (perspective) {
-          ctx.beginPath()
-          ctx.moveTo(imgW / 2 * (corners[0].x / 50 - 1), imgH / 2 * (corners[0].y / 50 - 1))
-          ctx.lineTo(imgW / 2 * (corners[1].x / 50 - 1), imgH / 2 * (corners[1].y / 50 - 1))
-          ctx.lineTo(imgW / 2 * (corners[2].x / 50 - 1), imgH / 2 * (corners[2].y / 50 - 1))
-          ctx.lineTo(imgW / 2 * (corners[3].x / 50 - 1), imgH / 2 * (corners[3].y / 50 - 1))
-          ctx.closePath()
-          ctx.clip()
-        }
         ctx.drawImage(img, -imgW / 2, -imgH / 2, imgW, imgH)
         ctx.restore()
         const link = document.createElement('a')
         link.download = `visiontrace-${Date.now()}.png`
         link.href = canvas.toDataURL('image/png')
         link.click()
-        showToast('Screenshot saved!')
+        showToast('Saved!')
       }
-      img.onerror = () => showToast('Screenshot failed — try again')
+      img.onerror = () => showToast('Save failed')
       img.src = imgSrc
     } else {
       const link = document.createElement('a')
       link.download = `visiontrace-${Date.now()}.png`
       link.href = canvas.toDataURL('image/png')
       link.click()
-      showToast('Screenshot saved!')
+      showToast('Saved!')
     }
-  }, [videoRef, imgSrc, displayTransform, opacity, perspective, corners, showToast])
+  }, [videoRef, imgSrc, displayTransform, opacity, showToast])
 
-  useEffect(() => {
-    if (cvError) showToast('AR tracking unavailable — check connection')
-  }, [cvError, showToast])
+  const resetAll = useCallback(() => {
+    setTransform(DEFAULT_TRANSFORM)
+    setCorners(DEFAULT_CORNERS)
+    transformHistory.current = [{ ...DEFAULT_TRANSFORM }]
+    historyIndex.current = 0
+    if (anchorActive) { stopTracking(); setAnchorActive(false) }
+    showUI()
+  }, [anchorActive, stopTracking, showUI])
 
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.ctrlKey || e.metaKey) {
-        if (e.key === 'z' && !e.shiftKey) { e.preventDefault(); undo() }
-        if ((e.key === 'z' && e.shiftKey) || e.key === 'y') { e.preventDefault(); redo() }
-        if (e.key === 's') { e.preventDefault(); takeScreenshot() }
-      }
-      if (e.key === 'l') toggleLock()
-      if (e.key === 'g') cycleGrid()
-    }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
-  }, [undo, redo, takeScreenshot, toggleLock, cycleGrid])
-
-  useEffect(() => {
-    if (delta.dx !== 0 || delta.dy !== 0) {
-      const limit = 500
-      const overflow = Math.abs(delta.dx) > limit || Math.abs(delta.dy) > limit
-      if (overflow) {
-        setTransform(prev => {
-          const nx = prev.x + delta.dx / 2
-          const ny = prev.y + delta.dy / 2
-          return { ...prev, x: nx, y: ny }
-        })
-      }
-    }
-  }, [delta])
+  const AR_STATUS_LABELS: Record<AnchorStatus, string> = {
+    idle: '',
+    loading: 'Loading AR…',
+    searching: 'Point at surface & tap Lock',
+    locked: 'Tracking',
+    lost: 'Tap to re-lock',
+  }
 
   if (camStatus === 'denied' || camStatus === 'error') {
     return (
       <div style={{
         display: 'flex', flexDirection: 'column', alignItems: 'center',
-        justifyContent: 'center', height: '100dvh', gap: 16, padding: 32,
+        justifyContent: 'center', height: '100dvh', gap: 20, padding: 32,
         background: '#000', color: '#fff', textAlign: 'center',
       }}>
-        <div style={{ fontSize: 48 }}>📷</div>
-        <div style={{ fontFamily: 'Syne, sans-serif', fontSize: 22, fontWeight: 700, letterSpacing: 2 }}>
+        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="#ff6b35" strokeWidth="1.5">
+          <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 1.4-1.9l8-3.6a2 2 0 0 1 1.6 0l8 3.6A2 2 0 0 1 23 8v11z"/>
+          <line x1="1" y1="1" x2="23" y2="23"/>
+        </svg>
+        <div style={{ fontFamily: 'Syne, sans-serif', fontSize: 24, fontWeight: 800, letterSpacing: 2 }}>
           VisionTrace
         </div>
-        <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: 14, lineHeight: 1.6 }}>
-          Camera access was denied.<br />
-          Please allow camera access in your browser settings and reload.
+        <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: 15, lineHeight: 1.6 }}>
+          Camera access denied.<br />Allow camera in browser settings.
         </div>
         <button
           onClick={() => window.location.reload()}
@@ -483,7 +444,7 @@ export default function Page() {
           style={{
             position: 'absolute', inset: 0,
             zIndex: 10, touchAction: 'none',
-            cursor: isLocked ? 'default' : (arActive && anchorStatus === 'locked') ? 'crosshair' : 'grab',
+            cursor: isLocked ? 'default' : 'grab',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
           }}
         >
@@ -500,9 +461,6 @@ export default function Page() {
               userSelect: 'none', WebkitUserSelect: 'none',
               pointerEvents: 'none',
               willChange: 'transform',
-              ...(perspective ? {
-                clipPath: `polygon(${corners[0].x}% ${corners[0].y}%,${corners[1].x}% ${corners[1].y}%,${corners[2].x}% ${corners[2].y}%,${corners[3].x}% ${corners[3].y}%)`,
-              } : {}),
             }}
           />
         </div>
@@ -512,273 +470,275 @@ export default function Page() {
 
       <GridOverlay mode={gridMode} />
 
-      {anchorActive && <AnchorStatusBar status={anchorStatus} libReady={libReady} />}
-
-      {anchorActive && anchorStatus === 'searching' && (
+      {/* AR Status */}
+      {anchorActive && anchorStatus !== 'idle' && (
         <div style={{
-          position: 'absolute', inset: 0,
-          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-          pointerEvents: 'none', zIndex: 55,
+          position: 'absolute', top: '50%', left: '50%',
+          transform: 'translate(-50%, -50%)',
+          pointerEvents: 'none', zIndex: 60,
+          transition: 'opacity 0.3s',
         }}>
           <div style={{
-            width: 80, height: 80, border: '2px solid rgba(251, 191, 36, 0.5)',
-            position: 'relative',
+            display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
+            opacity: anchorStatus === 'searching' || anchorStatus === 'loading' ? 1 : 0,
+            transition: 'opacity 0.3s',
           }}>
-            <div style={{ position: 'absolute', width: 2, height: 20, background: '#fbbf24', top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }} />
-            <div style={{ position: 'absolute', width: 20, height: 2, background: '#fbbf24', top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }} />
+            <div style={{
+              width: 72, height: 72, border: '2px solid rgba(255,107,53,0.7)',
+              borderRadius: 16, position: 'relative',
+            }}>
+              <div style={{ position: 'absolute', width: 2, height: 24, background: '#ff6b35', top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }} />
+              <div style={{ position: 'absolute', width: 24, height: 2, background: '#ff6b35', top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }} />
+            </div>
+            <div style={{
+              background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(12px)',
+              borderRadius: 10, padding: '8px 16px',
+              color: '#fff', fontFamily: 'DM Mono, monospace',
+              fontSize: 13, fontWeight: 600, letterSpacing: 0.5,
+              whiteSpace: 'nowrap',
+            }}>
+              {AR_STATUS_LABELS[anchorStatus]}
+            </div>
           </div>
-
-          <button
-            onClick={() => { lockAnchor(0.5, 0.5); showUI(); }}
-            style={{
-              pointerEvents: 'auto',
-              marginTop: 40,
-              padding: '12px 32px', borderRadius: 24,
-              background: 'linear-gradient(135deg, #fbbf24, #f59e0b)', border: 'none',
-              color: '#000', fontFamily: 'Syne, sans-serif',
-              fontSize: 16, fontWeight: 800, cursor: 'pointer',
-              touchAction: 'manipulation',
-              boxShadow: '0 4px 16px rgba(251, 191, 36, 0.4)',
-            }}
-          >
-            {Icon.lock} Lock Here
-          </button>
         </div>
       )}
 
       {anchorActive && anchorStatus === 'lost' && (
         <div style={{
-          position: 'absolute', bottom: 120, left: '50%',
-          transform: 'translateX(-50%)', zIndex: 55,
+          position: 'absolute', bottom: 180, left: '50%',
+          transform: 'translateX(-50%)', zIndex: 60,
           whiteSpace: 'nowrap',
         }}>
           <button
-            onClick={() => { startTargeting(); showUI() }}
+            onClick={(e) => { e.stopPropagation(); startTargeting(); showUI() }}
             style={{
-              padding: '10px 20px', borderRadius: 24,
+              padding: '12px 24px', borderRadius: 24,
               background: 'rgba(255,107,53,0.9)', border: 'none',
               color: '#fff', fontFamily: 'DM Mono, monospace',
-              fontSize: 13, fontWeight: 600, cursor: 'pointer',
+              fontSize: 14, fontWeight: 600, cursor: 'pointer',
               touchAction: 'manipulation',
               boxShadow: '0 4px 16px rgba(255,107,53,0.4)',
             }}
           >
-            ⌖ Aim Again
+            Relock
           </button>
         </div>
       )}
 
+      {/* Lock banner */}
       <div style={{
-        position: 'absolute', bottom: 120, left: '50%',
-        transform: 'translateX(-50%)', zIndex: 50,
-        transition: 'opacity 0.35s ease',
+        position: 'absolute', bottom: 180, left: '50%',
+        transform: 'translateX(-50%)', zIndex: 55,
         opacity: lockBanner ? 1 : 0,
         pointerEvents: 'none', whiteSpace: 'nowrap',
+        transition: 'opacity 0.35s',
       }}>
         <div style={{
           display: 'flex', alignItems: 'center', gap: 8,
           background: 'rgba(239,83,80,0.9)', backdropFilter: 'blur(16px)',
-          WebkitBackdropFilter: 'blur(16px)', borderRadius: 28,
-          padding: '12px 22px', fontSize: 13, fontWeight: 600,
-          color: '#fff', boxShadow: '0 4px 20px rgba(239,83,80,0.4)',
+          borderRadius: 28, padding: '12px 22px', fontSize: 13, fontWeight: 600,
+          color: '#fff',
         }}>
-          🔒 Tracing Locked — Long press to unlock
+          Locked — long press to unlock
         </div>
       </div>
 
-      <div style={{
-        position: 'absolute', inset: 0, zIndex: 40,
-        pointerEvents: 'none', transition: 'opacity 0.4s ease',
-        opacity: uiVisible ? 1 : (isLocked ? 0.15 : 0),
-      }}>
-        <div style={{
-          position: 'absolute', top: 0, left: 0, right: 0,
-          padding: '52px 16px 14px',
-          display: 'flex', alignItems: 'center', gap: 6,
-          background: 'linear-gradient(to bottom, rgba(0,0,0,0.82) 0%, transparent 100%)',
-          pointerEvents: uiVisible ? 'auto' : (isLocked ? 'auto' : 'none'),
-          flexWrap: 'nowrap', overflowX: 'auto',
-        }}>
-          <div style={{
-            fontFamily: 'Syne, sans-serif', fontSize: 15, fontWeight: 800,
-            letterSpacing: '3px', color: '#ff6b35', marginRight: 2,
-            textTransform: 'uppercase', flexShrink: 0,
-          }}>VT</div>
-
-          <HudButton onClick={pickImage} label={imgSrc ? 'Swap' : 'Load'}>
-            {imgSrc ? Icon.image : Icon.plus}
-          </HudButton>
-          <input ref={fileRef} type="file" accept="image/*" onChange={onFileChange} style={{ display: 'none' }} />
-
-          <HudButton onClick={toggleLock} active={isLocked} danger={isLocked}
-            label={isLocked ? 'Locked' : 'Lock'}>
-            {isLocked ? Icon.lock : Icon.unlock}
-          </HudButton>
-
-          <HudButton
-            onClick={toggleAnchor}
-            active={anchorActive}
-            label={anchorActive ? (anchorStatus === 'locked' ? 'AR On' : 'AR…') : 'Anchor'}
-            style={{
-              border: anchorActive && anchorStatus === 'locked' ? '1px solid rgba(34,197,94,0.7)' : undefined,
-              background: anchorActive && anchorStatus === 'locked' ? 'rgba(34,197,94,0.22)' : undefined,
-              color: anchorActive && anchorStatus === 'locked' ? '#22c55e' : undefined,
-            }}
-          >
-            {anchorActive ? Icon.anchorOn : Icon.anchorOff}
-          </HudButton>
-
-          <HudButton onClick={cycleGrid} active={gridMode !== 'none'}
-            label={gridMode === 'none' ? 'Grid' : gridMode}>
-            {Icon.grid}
-          </HudButton>
-
-          <HudButton
-            onClick={() => { setPerspective(v => !v); showUI() }}
-            active={perspective} label="Persp">
-            {Icon.perspective}
-          </HudButton>
-
-          <div style={{ flex: 1, minWidth: 8 }} />
-
-          <HudButton onClick={undo} label="Undo" disabled={historyIndex.current <= 0}>
-            {Icon.undo}
-          </HudButton>
-          <HudButton onClick={redo} label="Redo" disabled={historyIndex.current >= transformHistory.current.length - 1}>
-            {Icon.redo}
-          </HudButton>
-          <HudButton onClick={toggleCamera} label={facing === 'environment' ? 'Front' : 'Back'}>
-            {Icon.camera}
-          </HudButton>
-          <HudButton onClick={flipHorizontal} label="Flip H">
-            {Icon.flipH}
-          </HudButton>
-          <HudButton onClick={flipVertical} label="Flip V">
-            {Icon.flipV}
-          </HudButton>
-          <HudButton onClick={takeScreenshot} label="Save">
-            {Icon.export}
-          </HudButton>
-          <HudButton
-            onClick={() => {
-              setTransform(DEFAULT_TRANSFORM)
-              setCorners(DEFAULT_CORNERS)
-              transformHistory.current = [{ ...DEFAULT_TRANSFORM }]
-              historyIndex.current = 0
-              if (anchorActive) { stopTracking(); setAnchorActive(false) }
-              showUI()
-            }}
-            label="Reset">
-            {Icon.reset}
-          </HudButton>
-        </div>
-
-        {imgSrc && (
-          <div style={{
-            position: 'absolute', right: 12, top: '50%',
-            transform: 'translateY(-50%)',
-            display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
-            pointerEvents: uiVisible ? 'auto' : 'none',
-          }}>
-            <span style={{ fontSize: 9, fontFamily: 'DM Mono, monospace', color: 'rgba(255,255,255,0.6)', letterSpacing: 1 }}>
-              {Math.round(opacity * 100)}%
-            </span>
-            <VerticalSlider value={opacity} onChange={setOpacity} onInteract={showUI} />
-            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)' }}>◑</span>
+      {/* Onboarding */}
+      {showOnboarding && (
+        <div
+          style={{
+            position: 'absolute', inset: 0, zIndex: 70,
+            background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(8px)',
+            display: 'flex', flexDirection: 'column',
+            alignItems: 'center', justifyContent: 'center',
+            gap: 24, padding: '32px 40px',
+            textAlign: 'center',
+          }}
+          onClick={dismissOnboarding}
+        >
+          <div style={{ fontFamily: 'Syne, sans-serif', fontSize: 28, fontWeight: 800, color: '#ff6b35', letterSpacing: 3 }}>
+            VisionTrace
           </div>
-        )}
-
-        {imgSrc && (
-          <div style={{
-            position: 'absolute', bottom: 0, left: 0, right: 0,
-            padding: '12px 20px 36px',
-            display: 'flex', justifyContent: 'space-around',
-            background: 'linear-gradient(to top, rgba(0,0,0,0.75) 0%, transparent 100%)',
-            pointerEvents: 'none',
-          }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
             {[
-              ['Opacity', `${Math.round(opacity * 100)}%`],
-              ['Scale', `${displayTransform.scale.toFixed(1)}×`],
-              ['Rotate', `${Math.round(displayTransform.rotation)}°`],
-              ['AR', anchorActive ? (anchorStatus === 'locked' ? '●' : '…') : 'Off'],
-            ].map(([label, value]) => (
-              <div key={label} style={{ textAlign: 'center' }}>
-                <div style={{ fontSize: 9, color: 'rgba(255,255,255,0.4)', fontFamily: 'DM Mono, monospace', letterSpacing: 1 }}>{label}</div>
-                <div style={{ fontSize: 13, color: '#fff', fontWeight: 600, fontFamily: 'DM Mono, monospace' }}>{value}</div>
+              ['1', 'Load', 'Pick any reference image from your gallery'],
+              ['2', 'Trace', 'Drag, pinch & rotate to position over your drawing'],
+              ['3', 'AR Lock', 'Lock the image in place so it tracks your movement'],
+              ['4', 'Save', 'Export your traced work anytime'],
+            ].map(([num, title, desc]) => (
+              <div key={num} style={{ display: 'flex', gap: 16, alignItems: 'flex-start', textAlign: 'left' }}>
+                <div style={{ width: 28, height: 28, borderRadius: '50%', background: '#ff6b35', color: '#000', fontFamily: 'Syne, sans-serif', fontWeight: 800, fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                  {num}
+                </div>
+                <div>
+                  <div style={{ fontFamily: 'Syne, sans-serif', fontSize: 17, fontWeight: 700, color: '#fff', marginBottom: 4 }}>
+                    {title}
+                  </div>
+                  <div style={{ fontFamily: 'DM Mono, monospace', fontSize: 13, color: 'rgba(255,255,255,0.6)', lineHeight: 1.5 }}>
+                    {desc}
+                  </div>
+                </div>
               </div>
             ))}
           </div>
-        )}
-      </div>
+          <button
+            onClick={dismissOnboarding}
+            style={{
+              marginTop: 8, padding: '14px 40px', borderRadius: 14,
+              background: '#ff6b35', border: 'none', color: '#000',
+              fontFamily: 'Syne, sans-serif', fontWeight: 800, fontSize: 16,
+              cursor: 'pointer', touchAction: 'manipulation',
+            }}
+          >
+            Let's Go
+          </button>
+        </div>
+      )}
 
+      {/* Opacity slider */}
+      {imgSrc && uiVisible && (
+        <div style={{
+          position: 'absolute', right: 16, top: '50%',
+          transform: 'translateY(-50%)',
+          display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10,
+          zIndex: 45,
+        }}>
+          <OpacitySlider value={opacity} onChange={setOpacity} />
+          <span style={{ fontSize: 11, fontFamily: 'DM Mono, monospace', color: 'rgba(255,255,255,0.5)', letterSpacing: 1 }}>
+            {Math.round(opacity * 100)}%
+          </span>
+        </div>
+      )}
+
+      {/* No image hint */}
       {!imgSrc && camStatus === 'active' && (
         <div style={{
           position: 'absolute', inset: 0, zIndex: 5,
           display: 'flex', flexDirection: 'column',
           alignItems: 'center', justifyContent: 'center',
-          pointerEvents: 'none', gap: 14,
+          pointerEvents: 'none', gap: 16,
         }}>
           <div style={{
-            fontFamily: 'Syne, sans-serif', fontSize: 32, fontWeight: 800,
-            letterSpacing: '6px', color: '#ff6b35', textTransform: 'uppercase',
+            fontFamily: 'Syne, sans-serif', fontSize: 28, fontWeight: 800,
+            letterSpacing: '4px', color: '#ff6b35', textTransform: 'uppercase',
           }}>VisionTrace</div>
-          <div style={{ fontSize: 14, color: 'rgba(255,255,255,0.4)', fontFamily: 'DM Mono, monospace', letterSpacing: '1px' }}>
-            tap Load to add a reference image
+          <div style={{ fontSize: 14, color: 'rgba(255,255,255,0.35)', fontFamily: 'DM Mono, monospace' }}>
+            tap Load to add an image
           </div>
         </div>
       )}
+
+      {/* Bottom Bar */}
+      <BottomBar
+        imgSrc={!!imgSrc}
+        isLocked={isLocked}
+        gridMode={gridMode}
+        anchorActive={anchorActive}
+        anchorStatus={anchorStatus}
+        uiVisible={uiVisible}
+        showTools={showTools}
+        onPickImage={pickImage}
+        onToggleLock={toggleLock}
+        onCycleGrid={cycleGrid}
+        onToggleAnchor={handleAnchor}
+        onToggleTools={() => setShowTools(v => !v)}
+        onShowTools={showUI}
+      />
+
+      {/* Tools panel */}
+      {showTools && (
+        <div
+          style={{
+            position: 'absolute', bottom: 88, left: 0, right: 0,
+            zIndex: 50,
+            display: 'flex', justifyContent: 'center',
+            padding: '0 16px',
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div style={{
+            display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center',
+            background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(16px)',
+            borderRadius: 20, padding: '12px 14px',
+          }}>
+            <ToolBtn onClick={flipHorizontal}>Flip H</ToolBtn>
+            <ToolBtn onClick={flipVertical}>Flip V</ToolBtn>
+            <ToolBtn onClick={toggleCamera}>{facing === 'environment' ? 'Front' : 'Back'}</ToolBtn>
+            <ToolBtn onClick={() => { setPerspective(v => !v); showUI() }} active={perspective}>Persp</ToolBtn>
+            <ToolBtn onClick={undo} disabled={historyIndex.current <= 0}>Undo</ToolBtn>
+            <ToolBtn onClick={redo} disabled={historyIndex.current >= transformHistory.current.length - 1}>Redo</ToolBtn>
+            <ToolBtn onClick={resetAll}>Reset</ToolBtn>
+            <ToolBtn onClick={takeScreenshot}>Save</ToolBtn>
+          </div>
+        </div>
+      )}
+
+      <input ref={fileRef} type="file" accept="image/*" onChange={onFileChange} style={{ display: 'none' }} />
     </main>
   )
 }
 
-interface SliderProps {
-  value: number
-  onChange: (v: number) => void
-  onInteract: () => void
-}
-function VerticalSlider({ value, onChange, onInteract }: SliderProps) {
-  const TRACK_H = 180
-  const trackRef = useRef<HTMLDivElement>(null)
+function OpacitySlider({ value, onChange }: { value: number; onChange: (v: number) => void }) {
+  const ref = useRef<HTMLDivElement>(null)
   const dragging = useRef(false)
+  const H = 160
 
-  const getVal = useCallback((e: React.PointerEvent | PointerEvent) => {
-    const rect = trackRef.current!.getBoundingClientRect()
-    return 1 - Math.min(Math.max((e.clientY - rect.top) / TRACK_H, 0), 1)
-  }, [])
-
-  const onPointerDown = useCallback((e: React.PointerEvent) => {
-    e.preventDefault(); e.stopPropagation()
-    dragging.current = true
-    ;(e.target as Element).setPointerCapture(e.pointerId)
-    onChange(getVal(e)); onInteract()
-  }, [getVal, onChange, onInteract])
-
-  const onPointerMove = useCallback((e: React.PointerEvent) => {
-    if (!dragging.current) return
-    e.preventDefault()
-    onChange(getVal(e)); onInteract()
-  }, [getVal, onChange, onInteract])
-
-  const onPointerUp = useCallback(() => { dragging.current = false }, [])
-
-  const thumbY = (1 - value) * TRACK_H
+  const getVal = (e: React.PointerEvent) => {
+    const rect = ref.current!.getBoundingClientRect()
+    return 1 - Math.min(Math.max((e.clientY - rect.top) / H, 0), 1)
+  }
 
   return (
     <div
-      ref={trackRef}
-      onPointerDown={onPointerDown}
-      onPointerMove={onPointerMove}
-      onPointerUp={onPointerUp}
-      onPointerCancel={onPointerUp}
+      ref={ref}
+      onPointerDown={(e) => {
+        e.stopPropagation()
+        dragging.current = true
+        ;(e.target as Element).setPointerCapture(e.pointerId)
+        onChange(getVal(e))
+      }}
+      onPointerMove={(e) => {
+        if (!dragging.current) return
+        e.stopPropagation()
+        onChange(getVal(e))
+      }}
+      onPointerUp={() => { dragging.current = false }}
       style={{
-        position: 'relative', width: 44, height: TRACK_H,
+        width: 40, height: H,
         cursor: 'ns-resize', touchAction: 'none',
         display: 'flex', justifyContent: 'center',
       }}
     >
-      <div style={{ position: 'absolute', top: 0, bottom: 0, left: '50%', transform: 'translateX(-50%)', width: 6, borderRadius: 3, background: 'rgba(255,255,255,0.12)' }} />
-      <div style={{ position: 'absolute', bottom: 0, left: '50%', transform: 'translateX(-50%)', width: 6, height: `${value * 100}%`, borderRadius: 3, background: 'linear-gradient(to top, #ff6b35, rgba(255,107,53,0.4))' }} />
-      <div style={{ position: 'absolute', left: '50%', top: thumbY, transform: 'translate(-50%, -50%)', width: 26, height: 26, borderRadius: '50%', background: '#ff6b35', border: '2.5px solid white', boxShadow: '0 2px 10px rgba(255,107,53,0.6)' }} />
+      <div style={{ position: 'absolute', top: 0, bottom: 0, left: '50%', transform: 'translateX(-50%)', width: 5, borderRadius: 3, background: 'rgba(255,255,255,0.12)' }} />
+      <div style={{ position: 'absolute', bottom: 0, left: '50%', transform: 'translateX(-50%)', width: 5, height: `${value * 100}%`, borderRadius: 3, background: '#ff6b35' }} />
+      <div style={{ position: 'absolute', left: '50%', top: (1 - value) * H, transform: 'translate(-50%, -50%)', width: 24, height: 24, borderRadius: '50%', background: '#ff6b35', border: '2px solid white' }} />
     </div>
+  )
+}
+
+function ToolBtn({ children, onClick, active, disabled }: {
+  children: React.ReactNode
+  onClick: () => void
+  active?: boolean
+  disabled?: boolean
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        padding: '10px 16px', borderRadius: 12,
+        border: `1px solid ${active ? 'rgba(255,107,53,0.7)' : 'rgba(255,255,255,0.15)'}`,
+        background: active ? 'rgba(255,107,53,0.25)' : 'rgba(255,255,255,0.08)',
+        color: disabled ? 'rgba(255,255,255,0.3)' : '#fff',
+        fontFamily: 'DM Mono, monospace',
+        fontSize: 12, fontWeight: 600, letterSpacing: 0.5,
+        cursor: disabled ? 'default' : 'pointer',
+        touchAction: 'manipulation',
+        transition: 'all 0.15s',
+      }}
+    >
+      {children}
+    </button>
   )
 }
